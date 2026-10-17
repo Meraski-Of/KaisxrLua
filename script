@@ -1,0 +1,728 @@
+-- Kaisxr Lua - MM2 Complete Engine (v5.8 - Farm Speed Adjusted to 20)
+-- Brand: Kaisxr Lua
+
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+-- State Management
+local ToggleStates = {
+    AutoFarm = false,
+    AutoGrabGun = false,
+    KillAura = false,
+    AuraDistance = 15,
+    ESP = false,
+    NameESP = false,
+    GunESP = false,
+    WalkSpeed = false,
+    WalkSpeedVal = 16,
+    JumpPower = false,
+    JumpPowerVal = 50,
+    AntiFling = false
+}
+
+local ESPHighlights = {}
+local NameESPObjects = {}
+local GunESPObject = nil
+local SelectedTargetRaw = nil
+
+---------------------------------------------------------
+-- UTILITIES & ACCURATE TELEPORT LOGIC
+---------------------------------------------------------
+
+local function GetHRP()
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    return char and (char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 2))
+end
+
+local function GetRole(player)
+    if not player or not player.Character then return "Innocent" end
+    local char = player.Character
+    if char:FindFirstChild("Knife") or char:FindFirstChild("Revolver") then return "Murderer" end
+    if char:FindFirstChild("Gun") then return "Sheriff" end
+    
+    local bp = player:FindFirstChild("Backpack")
+    if bp then
+        if bp:FindFirstChild("Knife") then return "Murderer" end
+        if bp:FindFirstChild("Gun") then return "Sheriff" end
+    end
+    return "Innocent"
+end
+
+local function GetLocalRole()
+    return GetRole(LocalPlayer)
+end
+
+-- Lobiye Işınlanma
+local function TeleportToLobby()
+    local hrp = GetHRP()
+    if not hrp then return end
+
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if obj.Name:lower() == "lobby" or obj.Name:lower():find("lobby") then
+            local spawnPart = obj:FindFirstChild("Spawns", true) or obj:FindFirstChild("Spawn", true) or obj:FindFirstChild("LobbySpawn", true)
+            if spawnPart then
+                local targetPart = spawnPart:IsA("BasePart") and spawnPart or spawnPart:FindFirstChildWhichIsA("BasePart", true)
+                if targetPart then
+                    hrp.CFrame = targetPart.CFrame + Vector3.new(0, 3.5, 0)
+                    return
+                end
+            end
+            local anyPart = obj:FindFirstChildWhichIsA("BasePart", true)
+            if anyPart then
+                hrp.CFrame = anyPart.CFrame + Vector3.new(0, 5, 0)
+                return
+            end
+        end
+    end
+end
+
+-- Haritaya Işınlanma
+local function TeleportToMap()
+    local hrp = GetHRP()
+    if not hrp then return end
+
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if obj:IsA("Model") and not obj.Name:lower():find("lobby") then
+            if obj:FindFirstChild("CoinContainer") or obj:FindFirstChild("Spawns") or obj:FindFirstChild("SpawnPoints") then
+                local spawns = obj:FindFirstChild("Spawns") or obj:FindFirstChild("SpawnPoints") or obj:FindFirstChild("CoinContainer")
+                local targetPart = spawns:FindFirstChildWhichIsA("BasePart", true)
+                
+                if not targetPart then
+                    targetPart = obj:FindFirstChildWhichIsA("BasePart", true)
+                end
+
+                if targetPart then
+                    hrp.CFrame = targetPart.CFrame + Vector3.new(0, 4, 0)
+                    return
+                end
+            end
+        end
+    end
+end
+
+-- TARGET OYUNCUYU BULMA
+local function FindPlayerByRawString(str)
+    if type(str) == "table" then
+        str = str[1] or tostring(str)
+    end
+    if not str or type(str) ~= "string" then return nil end
+    
+    local extractedUsername = str:match("%(@(.+)%)")
+    
+    for _, p in ipairs(Players:GetPlayers()) do
+        if extractedUsername and p.Name == extractedUsername then
+            return p
+        elseif p.Name == str or p.DisplayName == str then
+            return p
+        end
+    end
+    return nil
+end
+
+-- TARGET OYUNCUYA IŞINLANMA
+local function TeleportToSelectedTarget()
+    local hrp = GetHRP()
+    if not hrp then return end
+
+    if not SelectedTargetRaw then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                SelectedTargetRaw = p.DisplayName .. " (@" .. p.Name .. ")"
+                break
+            end
+        end
+    end
+
+    local targetPlayer = FindPlayerByRawString(SelectedTargetRaw)
+    if targetPlayer and targetPlayer.Character then
+        local targetHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if targetHRP then
+            hrp.CFrame = targetHRP.CFrame + Vector3.new(0, 2.5, 0)
+        end
+    end
+end
+
+---------------------------------------------------------
+-- OPTIMIZED ESP LOGIC
+---------------------------------------------------------
+
+local function ClearVisuals()
+    for _, h in pairs(ESPHighlights) do if h then h:Destroy() end end
+    for _, tag in pairs(NameESPObjects) do if tag then tag:Destroy() end end
+    if GunESPObject then GunESPObject:Destroy() GunESPObject = nil end
+    ESPHighlights = {}
+    NameESPObjects = {}
+end
+
+local function UpdateVisuals()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("Head") and p.Character:FindFirstChild("HumanoidRootPart") then
+            local char = p.Character
+            local head = char.Head
+            local role = GetRole(p)
+            
+            local color = Color3.fromRGB(50, 205, 50)
+            if role == "Murderer" then color = Color3.fromRGB(255, 30, 30)
+            elseif role == "Sheriff" then color = Color3.fromRGB(30, 144, 255) end
+
+            if ToggleStates.ESP then
+                local highlight = ESPHighlights[p]
+                if not highlight or highlight.Parent ~= char then
+                    if highlight then highlight:Destroy() end
+                    highlight = Instance.new("Highlight")
+                    highlight.Name = "Kaisxr_Highlight"
+                    highlight.FillTransparency = 0.4
+                    highlight.OutlineTransparency = 0
+                    highlight.Parent = char
+                    ESPHighlights[p] = highlight
+                end
+                highlight.FillColor = color
+            else
+                if ESPHighlights[p] then
+                    ESPHighlights[p]:Destroy()
+                    ESPHighlights[p] = nil
+                end
+            end
+
+            if ToggleStates.NameESP then
+                local bGui = NameESPObjects[p]
+                if not bGui or bGui.Parent ~= head then
+                    if bGui then bGui:Destroy() end
+                    bGui = Instance.new("BillboardGui")
+                    bGui.Name = "Kaisxr_NameESP"
+                    bGui.Adornee = head
+                    bGui.Size = UDim2.new(0, 150, 0, 30)
+                    bGui.StudsOffset = Vector3.new(0, 2.5, 0)
+                    bGui.AlwaysOnTop = true
+                    bGui.Parent = head
+
+                    local txtLabel = Instance.new("TextLabel")
+                    txtLabel.Name = "Tag"
+                    txtLabel.Size = UDim2.new(1, 0, 1, 0)
+                    txtLabel.BackgroundTransparency = 1
+                    txtLabel.Font = Enum.Font.SourceSansBold
+                    txtLabel.TextSize = 15
+                    txtLabel.TextStrokeTransparency = 0
+                    txtLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+                    txtLabel.Parent = bGui
+                    NameESPObjects[p] = bGui
+                end
+
+                local label = bGui:FindFirstChild("Tag")
+                if label then
+                    label.Text = string.format("[%s]\n%s", role:upper(), p.DisplayName)
+                    label.TextColor3 = color
+                end
+            else
+                if NameESPObjects[p] then
+                    NameESPObjects[p]:Destroy()
+                    NameESPObjects[p] = nil
+                end
+            end
+        else
+            if ESPHighlights[p] then ESPHighlights[p]:Destroy() ESPHighlights[p] = nil end
+            if NameESPObjects[p] then NameESPObjects[p]:Destroy() NameESPObjects[p] = nil end
+        end
+    end
+
+    if ToggleStates.GunESP then
+        local gunDrop = Workspace:FindFirstChild("GunDrop", true)
+        if gunDrop and gunDrop:IsA("BasePart") then
+            if not GunESPObject or GunESPObject.Parent ~= gunDrop then
+                if GunESPObject then GunESPObject:Destroy() end
+                GunESPObject = Instance.new("BillboardGui")
+                GunESPObject.Name = "Kaisxr_GunESP"
+                GunESPObject.Adornee = gunDrop
+                GunESPObject.Size = UDim2.new(0, 150, 0, 30)
+                GunESPObject.StudsOffset = Vector3.new(0, 2, 0)
+                GunESPObject.AlwaysOnTop = true
+                GunESPObject.Parent = gunDrop
+
+                local txtLabel = Instance.new("TextLabel")
+                txtLabel.Name = "Tag"
+                txtLabel.Size = UDim2.new(1, 0, 1, 0)
+                txtLabel.BackgroundTransparency = 1
+                txtLabel.Font = Enum.Font.SourceSansBold
+                txtLabel.TextSize = 16
+                txtLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+                txtLabel.TextStrokeTransparency = 0
+                txtLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+                txtLabel.Text = "[DROPPED GUN]"
+                txtLabel.Parent = GunESPObject
+            end
+        else
+            if GunESPObject then GunESPObject:Destroy() GunESPObject = nil end
+        end
+    else
+        if GunESPObject then GunESPObject:Destroy() GunESPObject = nil end
+    end
+end
+
+---------------------------------------------------------
+-- LOOPS & AUTOMATION
+---------------------------------------------------------
+
+-- NOCLIP LOOP
+RunService.Stepped:Connect(function()
+    if ToggleStates.AntiFling then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                for _, part in ipairs(p.Character:GetChildren()) do
+                    if part:IsA("BasePart") then part.CanCollide = false end
+                end
+            end
+        end
+    end
+
+    if ToggleStates.AutoFarm then
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetChildren()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("Humanoid") then
+        local hum = char.Humanoid
+        if ToggleStates.WalkSpeed then hum.WalkSpeed = ToggleStates.WalkSpeedVal end
+        if ToggleStates.JumpPower then
+            hum.UseJumpPower = true
+            hum.JumpPower = ToggleStates.JumpPowerVal
+        end
+    end
+
+    if ToggleStates.ESP or ToggleStates.NameESP or ToggleStates.GunESP then
+        UpdateVisuals()
+    end
+end)
+
+-- NOCLIP SMOOTH COIN FARM LOOP (Hız: 20 - Doğal Oyuncu Hızı)
+task.spawn(function()
+    local farmSpeed = 20
+
+    while true do
+        task.wait(0.1)
+        if ToggleStates.AutoFarm then
+            local hrp = GetHRP()
+            if hrp then
+                local coinContainer = nil
+                for _, obj in ipairs(Workspace:GetChildren()) do
+                    if obj:IsA("Model") and not obj.Name:lower():find("lobby") then
+                        coinContainer = obj:FindFirstChild("CoinContainer") or obj:FindFirstChild("Normal")
+                        if coinContainer then break end
+                    end
+                end
+                
+                if not coinContainer then
+                    coinContainer = Workspace:FindFirstChild("CoinContainer") or Workspace:FindFirstChild("Normal")
+                end
+
+                if coinContainer then
+                    for _, v in ipairs(coinContainer:GetChildren()) do
+                        if not ToggleStates.AutoFarm then break end
+                        if v.Name == "Coin" or v.Name == "CoinVisual" or v.Name:lower():find("coin") then
+                            local targetPart = v:IsA("BasePart") and v or v:FindFirstChildWhichIsA("BasePart", true)
+                            if targetPart and targetPart.Parent then
+                                local distance = (hrp.Position - targetPart.Position).Magnitude
+                                local travelTime = distance / farmSpeed
+                                
+                                local tweenInfo = TweenInfo.new(travelTime, Enum.EasingStyle.Linear)
+                                local tween = TweenService:Create(hrp, tweenInfo, {CFrame = targetPart.CFrame})
+                                tween:Play()
+                                
+                                local timeSpent = 0
+                                while timeSpent < travelTime and ToggleStates.AutoFarm do
+                                    task.wait(0.05)
+                                    timeSpent = timeSpent + 0.05
+                                end
+                                
+                                if not ToggleStates.AutoFarm then
+                                    tween:Cancel()
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Auto Grab Gun Loop
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if ToggleStates.AutoGrabGun and GetLocalRole() ~= "Murderer" then
+            local hrp = GetHRP()
+            if hrp then
+                local gunDrop = Workspace:FindFirstChild("GunDrop", true)
+                if gunDrop and gunDrop:IsA("BasePart") then
+                    local originalCFrame = hrp.CFrame
+                    hrp.CFrame = gunDrop.CFrame + Vector3.new(0, 1, 0)
+                    task.wait(0.2)
+                    hrp.CFrame = originalCFrame
+                end
+            end
+        end
+    end
+end)
+
+---------------------------------------------------------
+-- CLICK KILL AURA
+---------------------------------------------------------
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.UserInputType == Enum.UserInputType.MouseButton1 and ToggleStates.KillAura then
+        local char = LocalPlayer.Character
+        if char and GetLocalRole() == "Murderer" then
+            local knife = char:FindFirstChild("Knife") or (LocalPlayer.Backpack and LocalPlayer.Backpack:FindFirstChild("Knife"))
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            
+            if knife and hrp then
+                if knife.Parent ~= char then 
+                    knife.Parent = char 
+                end
+                
+                for _, target in ipairs(Players:GetPlayers()) do
+                    if target ~= LocalPlayer and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+                        local targetHRP = target.Character.HumanoidRootPart
+                        local distance = (hrp.Position - targetHRP.Position).Magnitude
+                        
+                        if distance <= ToggleStates.AuraDistance then
+                            pcall(function()
+                                local handle = knife:FindFirstChild("Handle")
+                                if handle then
+                                    knife:Activate()
+                                    firetouchinterest(handle, targetHRP, 0)
+                                    firetouchinterest(handle, targetHRP, 1)
+                                    
+                                    local head = target.Character:FindFirstChild("Head")
+                                    if head then
+                                        firetouchinterest(handle, head, 0)
+                                        firetouchinterest(handle, head, 1)
+                                    end
+                                end
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+---------------------------------------------------------
+-- UI WINDOW & TABS (KEY SYSTEM WITH DIRECT COPY BUTTON)
+---------------------------------------------------------
+
+local Window = Rayfield:CreateWindow({
+   Name = "Kaisxr Lua",
+   LoadingTitle = "Kaisxr Lua Engine v5.8",
+   LoadingSubtitle = "by Kaisxr",
+   ConfigurationSaving = { Enabled = true, FolderName = "KaisxrConfig", FileName = "KaisxrMM2Settings" },
+   Discord = { 
+      Enabled = true, 
+      Invite = "kquH74Q8T5", 
+      RememberJoins = true 
+   },
+   KeySystem = true,
+   KeySettings = {
+      Title = "Kaisxr Lua | Key System",
+      Subtitle = "Get Key in Discord Server",
+      Note = "Join Discord: discord.gg/kquH74Q8T5",
+      FileName = "KaisxrKey",
+      SaveKey = true,
+      GrabKeyFromSite = false,
+      Key = {"Kaisxr-MM2-2026"},
+      Actions = {
+         [1] = {
+            Text = "Copy Discord Link",
+            OnPress = function()
+               if setclipboard then
+                   setclipboard("https://discord.gg/kquH74Q8T5")
+               end
+            end
+         }
+      }
+   },
+   Theme = "DarkBlue"
+})
+
+-- 1. MAIN TAB
+local MainTab = Window:CreateTab("Main", 4483362458)
+MainTab:CreateSection("Farm & Automation")
+
+MainTab:CreateToggle({
+   Name = "Auto Farm Coins (Noclip & Smooth)",
+   CurrentValue = false,
+   Flag = "AutoFarm",
+   Callback = function(Value) ToggleStates.AutoFarm = Value end,
+})
+
+MainTab:CreateToggle({
+   Name = "Automatically Grab Gun",
+   CurrentValue = false,
+   Flag = "AutoGrabGun",
+   Callback = function(Value) ToggleStates.AutoGrabGun = Value end,
+})
+
+MainTab:CreateSection("Teleports")
+MainTab:CreateButton({
+   Name = "Teleport To Lobby",
+   Callback = function() TeleportToLobby() end,
+})
+
+MainTab:CreateButton({
+   Name = "Teleport To Map",
+   Callback = function() TeleportToMap() end,
+})
+
+-- 2. TARGET TAB
+local TargetTab = Window:CreateTab("Target", 4483362458)
+TargetTab:CreateSection("Target Selection")
+
+local function GetPlayerList()
+    local plist = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then 
+            table.insert(plist, p.DisplayName .. " (@" .. p.Name .. ")") 
+        end
+    end
+    if #plist == 0 then table.insert(plist, "No Players Found") end
+    return plist
+end
+
+local TargetDropdown = TargetTab:CreateDropdown({
+   Name = "Target Player",
+   Options = GetPlayerList(),
+   CurrentOption = GetPlayerList()[1] or "",
+   Flag = "SelectedTarget",
+   Callback = function(Option) 
+       if type(Option) == "table" then
+           SelectedTargetRaw = Option[1]
+       else
+           SelectedTargetRaw = Option
+       end
+   end,
+})
+
+Players.PlayerAdded:Connect(function() TargetDropdown:Refresh(GetPlayerList()) end)
+Players.PlayerRemoving:Connect(function() TargetDropdown:Refresh(GetPlayerList()) end)
+
+TargetTab:CreateButton({
+   Name = "Teleport To Target",
+   Callback = function() TeleportToSelectedTarget() end,
+})
+
+-- 3. MISC TAB
+local MiscTab = Window:CreateTab("Misc", 4483362458)
+MiscTab:CreateSection("Visuals & Render")
+
+MiscTab:CreateToggle({
+   Name = "Player Chams / ESP",
+   CurrentValue = false,
+   Flag = "PlayerChams",
+   Callback = function(Value)
+       ToggleStates.ESP = Value
+       if not Value then
+           for _, h in pairs(ESPHighlights) do if h then h:Destroy() end end
+           ESPHighlights = {}
+       end
+   end,
+})
+
+MiscTab:CreateToggle({
+   Name = "Name ESP",
+   CurrentValue = false,
+   Flag = "NameESP",
+   Callback = function(Value)
+       ToggleStates.NameESP = Value
+       if not Value then
+           for _, tag in pairs(NameESPObjects) do if tag then tag:Destroy() end end
+           NameESPObjects = {}
+       end
+   end,
+})
+
+MiscTab:CreateToggle({
+   Name = "Gun ESP",
+   CurrentValue = false,
+   Flag = "GunESP",
+   Callback = function(Value)
+       ToggleStates.GunESP = Value
+       if not Value and GunESPObject then
+           GunESPObject:Destroy()
+           GunESPObject = nil
+       end
+   end,
+})
+
+-- 4. ROLES TAB
+local RolesTab = Window:CreateTab("Roles", 4483362458)
+RolesTab:CreateSection("Murderer Tools")
+
+RolesTab:CreateToggle({
+   Name = "Click Kill Aura",
+   CurrentValue = false,
+   Flag = "KillAura",
+   Callback = function(Value) ToggleStates.KillAura = Value end,
+})
+
+RolesTab:CreateSlider({
+   Name = "Aura Distance",
+   Range = {5, 50},
+   Increment = 1,
+   Suffix = " studs",
+   CurrentValue = 15,
+   Flag = "AuraDistance",
+   Callback = function(Value) ToggleStates.AuraDistance = Value end,
+})
+
+RolesTab:CreateSection("Sheriff Tools")
+RolesTab:CreateButton({
+   Name = "Shoot Murderer",
+   Callback = function()
+       local char = LocalPlayer.Character
+       local hrp = GetHRP()
+       local gun = LocalPlayer.Backpack:FindFirstChild("Gun") or (char and char:FindFirstChild("Gun"))
+       if gun and hrp then
+           for _, p in ipairs(Players:GetPlayers()) do
+               if GetRole(p) == "Murderer" and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+                   gun.Parent = char
+                   local targetHRP = p.Character.HumanoidRootPart
+                   hrp.CFrame = CFrame.new(hrp.Position, targetHRP.Position)
+                   task.wait(0.05)
+                   gun:Activate()
+                   break
+               end
+           end
+       end
+   end,
+})
+
+-- 5. PLAYER TAB
+local PlayerTab = Window:CreateTab("Player", 4483362458)
+PlayerTab:CreateSection("Movement & Protection")
+
+PlayerTab:CreateToggle({
+   Name = "Walk Speed Toggle",
+   CurrentValue = false,
+   Flag = "WalkSpeedToggle",
+   Callback = function(Value)
+       ToggleStates.WalkSpeed = Value
+       if not Value and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+           LocalPlayer.Character.Humanoid.WalkSpeed = 16
+       end
+   end,
+})
+
+PlayerTab:CreateSlider({
+   Name = "Walk Speed",
+   Range = {16, 200},
+   Increment = 1,
+   CurrentValue = 16,
+   Flag = "WalkSpeedValue",
+   Callback = function(Value) ToggleStates.WalkSpeedVal = Value end,
+})
+
+PlayerTab:CreateToggle({
+   Name = "Jump Power Toggle",
+   CurrentValue = false,
+   Flag = "JumpPowerToggle",
+   Callback = function(Value)
+       ToggleStates.JumpPower = Value
+       if not Value and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+           LocalPlayer.Character.Humanoid.JumpPower = 50
+       end
+   end,
+})
+
+PlayerTab:CreateSlider({
+   Name = "Jump Power",
+   Range = {50, 300},
+   Increment = 1,
+   CurrentValue = 50,
+   Flag = "JumpPowerValue",
+   Callback = function(Value) ToggleStates.JumpPowerVal = Value end,
+})
+
+PlayerTab:CreateToggle({
+   Name = "Anti Fling",
+   CurrentValue = false,
+   Flag = "AntiFling",
+   Callback = function(Value) ToggleStates.AntiFling = Value end,
+})
+
+-- 6. SETTINGS TAB
+local SettingsTab = Window:CreateTab("Settings", 4483362458)
+SettingsTab:CreateSection("Community")
+
+SettingsTab:CreateButton({
+   Name = "Join Discord Server",
+   Callback = function()
+       if setclipboard then
+           setclipboard("https://discord.gg/kquH74Q8T5")
+           Rayfield:Notify({
+              Title = "Kaisxr Lua Community",
+              Content = "Discord invite link copied to clipboard!",
+              Duration = 5,
+              Image = 4483362458,
+           })
+       else
+           Rayfield:Notify({
+              Title = "Kaisxr Lua Community",
+              Content = "Link: discord.gg/kquH74Q8T5",
+              Duration = 7,
+              Image = 4483362458,
+           })
+       end
+   end,
+})
+
+SettingsTab:CreateSection("Server Control")
+
+SettingsTab:CreateButton({
+   Name = "Rejoin Server",
+   Callback = function() TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer) end,
+})
+
+SettingsTab:CreateButton({
+   Name = "Server Hop",
+   Callback = function()
+       local Http = game:GetService("HttpService")
+       local raw = game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100")
+       local _servers = Http:JSONDecode(raw)
+       for _, s in ipairs(_servers.data) do
+           if s.playing ~= s.maxPlayers and s.id ~= game.JobId then
+               TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LocalPlayer)
+               break
+           end
+       end
+   end,
+})
+
+Rayfield:Notify({
+   Title = "Kaisxr Lua v5.8 Verified!",
+   Content = "Key accepted! Welcome to Kaisxr Engine.",
+   Duration = 5,
+   Image = 4483362458,
+})
